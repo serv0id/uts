@@ -4,13 +4,16 @@ from typing import Any
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, send_from_directory
 
 import config
 
 app = Flask(__name__)
-# CORS(app, origins=["https://uts.desrever.dev"])
+
+
+@app.route('/')
+def index():
+    return send_from_directory('.', 'uts_poc.html')
 
 
 @app.route('/uts/stations', methods=['GET'])
@@ -45,3 +48,7 @@ def encrypt() -> str:
     ciphertext = cipher.encrypt(pad(request.data, 16))
 
     return base64.b64encode(ciphertext).decode()
+
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=5000, debug=True)

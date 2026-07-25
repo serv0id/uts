@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UTS PoC</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { theme: { extend: { fontFamily: {
+    sans: ['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','sans-serif'] } } } };
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>body{font-family:'Inter',system-ui,sans-serif}</style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// --- config: change this to point the frontend at a different backend ---
+const CONFIG = { API_BASE: '' };   // '' = same origin (served by Flask). e.g. 'http://127.0.0.1:5000'
+
+const api = async (p, o) => {
+  const r = await fetch(CONFIG.API_BASE.replace(/\/+$/, '') + p, o);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r;
+};
+
+function useDebounced(value, ms) {
+  const [v, setV] = useState(value);
+  useEffect(() => { const t = setTimeout(() => setV(value), ms); return () => clearTimeout(t); }, [value, ms]);
+  return v;
+}
+
+function QR({ text }) {
+  if (!text) return null;
+  let html = null;
+  try { const q = qrcode(0, 'M'); q.addData(text); q.make(); html = q.createImgTag(5, 8); } catch (e) {}
+  return (
+    <div className="flex justify-center pt-4">
+      {html
+        ? <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 [&_img]:h-52 [&_img]:w-52 [&_img]:max-w-[60vw] [&_img]:[image-rendering:pixelated]"
+               dangerouslySetInnerHTML={{ __html: html }} />
+        : <p className="text-sm text-slate-500">QR library offline, payload above is the QR content.</p>}
+    </div>
+  );
+}
+
+const fieldCls = "w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200";
+
+function App() {
+  const [query, setQuery] = useState('');
+  const debounced = useDebounced(query, 180);
+  const [results, setResults] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');            // selected station code (kept for the payload)
+  const [orig, setOrig] = useState(null);          // original station coords {lat,lon} for reset
+  const [lat, setLat] = useState('');              // editable: latitude
+  const [lon, setLon] = useState('');              // editable: longitude
+  const [useLoc, setUseLoc] = useState(false);
+  const [locMsg, setLocMsg] = useState('');
+  const [payload, setPayload] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const boxRef = useRef(null);
+
+  // search
+  useEffect(() => {
+    const q = debounced.trim();
+    if (!q) { setResults([]); setOpen(false); return; }
+    let alive = true;
+    api('/uts/stations?q=' + encodeURIComponent(q))
+      .then(r => r.json())
+      .then(rows => { if (alive) { setResults(rows.slice(0, 20)); setOpen(true); } })
+      .catch(e => { if (alive) { setResults([{ __err: e.message }]); setOpen(true); } });
+    return () => { alive = false; };
+  }, [debounced]);
+
+  // close dropdown on outside click
+  useEffect(() => {
+    const h = e => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('click', h);
+    return () => document.removeEventListener('click', h);
+  }, []);
+
+  const pick = async (c, n) => {
+    setOpen(false); setQuery(n);
+    try {
+      const j = await (await api('/uts/coordinates/' + encodeURIComponent(c))).json();
+      const la = Number(j.lat), lo = Number(j.lon);
+      setCode(c); setLat(la.toFixed(13)); setLon(lo.toFixed(13));
+      setOrig({ lat: la, lon: lo }); setUseLoc(false); setLocMsg(''); setPayload('');
+    } catch (e) { setErr(e.message); }
+  };
+
+  const toggleLoc = (checked) => {
+    setUseLoc(checked);
+    if (!checked) {
+      if (orig) { setLat(orig.lat.toFixed(13)); setLon(orig.lon.toFixed(13)); }
+      setLocMsg(''); return;
+    }
+    if (!navigator.geolocation) { setLocMsg('no geolocation'); setUseLoc(false); return; }
+    setLocMsg('getting location…');
+    navigator.geolocation.getCurrentPosition(
+      p => { setLat(p.coords.latitude.toFixed(13)); setLon(p.coords.longitude.toFixed(13));
+             setLocMsg(`using GPS ${p.coords.latitude.toFixed(6)}, ${p.coords.longitude.toFixed(6)}`); },
+      e => { setLocMsg('GPS: ' + e.message); setUseLoc(false); }
+    );
+  };
+
+  const encrypt = async () => {
+    setErr(''); setBusy(true);
+    try {
+      const body = `${query} : ${code} : ${lat} : ${lon}`;
+      const r = await api('/uts/encrypt', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body });
+      setPayload((await r.text()).trim());
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="mx-auto max-w-xl px-4 pb-20 pt-10">
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold tracking-tight">UTS PoC</h1>
+        <a href="https://www.desrever.dev/posts/uts/" target="_blank" rel="noopener"
+           className="text-sm font-medium text-slate-500 hover:underline">desrever.dev/posts/uts</a>
+      </header>
+
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+        <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Station {code && <span className="font-mono normal-case text-slate-400">code {code}</span>}
+        </label>
+        <div className="relative" ref={boxRef}>
+          <input
+            value={query} onChange={e => setQuery(e.target.value)} onFocus={() => results.length && setOpen(true)}
+            placeholder="Search name or code" autoComplete="off" className={fieldCls} />
+          {open && results.length > 0 && (
+            <div className="absolute z-20 mt-1.5 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+              {results.map((r, i) => r.__err
+                ? <div key={i} className="px-3.5 py-2.5 text-sm text-red-600">{r.__err}</div>
+                : <button key={i} onMouseDown={() => pick(r[0], r[1])}
+                    className="flex w-full items-center justify-between border-b border-slate-100 px-3.5 py-2.5 text-left text-sm last:border-0 hover:bg-slate-100">
+                    <span>{r[1]}</span><span className="font-mono text-xs text-slate-400">{r[0]}</span>
+                  </button>)}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Latitude</label>
+              <input value={lat} onChange={e => setLat(e.target.value)} inputMode="decimal"
+                className={fieldCls + " font-mono text-xs"} />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Longitude</label>
+              <input value={lon} onChange={e => setLon(e.target.value)} inputMode="decimal"
+                className={fieldCls + " font-mono text-xs"} />
+            </div>
+          </div>
+        </div>
+
+        <label className="mt-3 flex cursor-pointer items-center gap-2.5 text-sm">
+          <input type="checkbox" checked={useLoc} onChange={e => toggleLoc(e.target.checked)}
+            className="h-4 w-4 rounded accent-slate-700" />
+          Use my current GPS location as the coordinates
+        </label>
+        {locMsg && <p className="mt-1.5 font-mono text-xs text-slate-500">{locMsg}</p>}
+      </section>
+
+      <section className="mt-4 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+        <button onClick={encrypt} disabled={!code || busy}
+          className="w-full rounded-xl bg-slate-700 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-40">
+          {busy ? 'Generating…' : 'Generate QR'}
+        </button>
+        <div className="mt-3 min-h-[2.5rem] break-all rounded-xl bg-slate-50 p-3 font-mono text-[11px] text-slate-500 ring-1 ring-slate-200">
+          {payload || 'no payload yet'}
+        </div>
+        <QR text={payload} />
+        {err && <p className="mt-2 text-sm text-red-600">{err}</p>}
+      </section>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
