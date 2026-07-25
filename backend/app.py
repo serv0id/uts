@@ -38,6 +38,9 @@ def get_cor(scd) -> dict:
         res = cur.execute("SELECT Latitude,Longitude FROM MUSER_STATION WHERE STATION_CODE=?", (scd,))
         coords = res.fetchone()
 
+        if not coords:
+            return {"error": "unknown station"}, 404
+
         return {"lat": coords[0], "lon": coords[1]}
 
 
